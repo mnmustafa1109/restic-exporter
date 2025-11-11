@@ -1161,18 +1161,7 @@
       "fieldConfig": {
         "defaults": {
           "color": {
-            "mode": "palette-classic"
-          },
-          "custom": {
-            "align": "auto",
-            "cellOptions": {
-              "type": "auto"
-            },
-            "filterable": false,
-            "footer": {
-              "reducers": []
-            },
-            "inspect": false
+            "mode": "thresholds"
           },
           "mappings": [],
           "thresholds": {
@@ -1195,12 +1184,23 @@
         "y": 31
       },
       "id": 46,
-      "maxDataPoints": 100,
       "options": {
-        "cellHeight": "sm",
-        "frameIndex": 1,
-        "showHeader": true,
-        "sortBy": []
+        "colorMode": "value",
+        "graphMode": "area",
+        "justifyMode": "auto",
+        "orientation": "auto",
+        "percentChangeColorMode": "standard",
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "showPercentChange": false,
+        "text": {},
+        "textMode": "auto",
+        "wideLayout": true
       },
       "pluginVersion": "12.2.1",
       "targets": [
@@ -1210,34 +1210,14 @@
             "uid": "PBFA97CFB590B2093"
           },
           "editorMode": "code",
-          "exemplar": true,
-          "expr": "last_over_time(max by(client_hostname, snapshot_tag) (restic_backup_files_per_dir)[30m:])",
-          "format": "table",
-          "instant": true,
+          "expr": "avg(restic_backup_files_per_dir)",
           "legendFormat": "__auto",
           "range": true,
           "refId": "A"
         }
       ],
       "title": "Average files per directory",
-      "transformations": [
-        {
-          "id": "organize",
-          "options": {
-            "excludeByName": {
-              "Time": true,
-              "instance": true,
-              "job": true,
-              "snapshot_hash": true
-            },
-            "indexByName": {},
-            "renameByName": {
-              "Value": "avg_files_per_dir"
-            }
-          }
-        }
-      ],
-      "type": "table"
+      "type": "stat"
     },
     {
       "datasource": {
