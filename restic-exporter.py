@@ -75,6 +75,11 @@ class ResticCollector(object):
             "Timestamp of the last backup",
             labels=common_label_names,
         )
+        backup_timestamp_seconds = GaugeMetricFamily(
+            "restic_backup_timestamp_seconds",
+            "Timestamp of the last backup in seconds since epoch",
+            labels=common_label_names,
+        )
         backup_files_total = CounterMetricFamily(
             "restic_backup_files_total",
             "Number of files in the backup",
@@ -85,9 +90,35 @@ class ResticCollector(object):
             "Total size of backup in bytes",
             labels=common_label_names,
         )
+        backup_dirs_total = CounterMetricFamily(
+            "restic_backup_dirs_total",
+            "Number of directories in the backup",
+            labels=common_label_names,
+        )
+        backup_paths_count = CounterMetricFamily(
+            "restic_backup_paths_count",
+            "Number of backup paths in the snapshot",
+            labels=common_label_names,
+        )
         backup_snapshots_total = CounterMetricFamily(
             "restic_backup_snapshots_total",
             "Total number of snapshots",
+            labels=common_label_names,
+        )
+        # Additional metrics for better Grafana dashboard
+        backup_size_bytes = GaugeMetricFamily(
+            "restic_backup_size_bytes",
+            "Size of backup in bytes for each snapshot",
+            labels=common_label_names,
+        )
+        backup_files_per_dir = GaugeMetricFamily(
+            "restic_backup_files_per_dir",
+            "Average number of files per directory",
+            labels=common_label_names,
+        )
+        backup_age_seconds = GaugeMetricFamily(
+            "restic_backup_age_seconds",
+            "Age of backup in seconds",
             labels=common_label_names,
         )
         scrape_duration_seconds = GaugeMetricFamily(
@@ -111,12 +142,26 @@ class ResticCollector(object):
                 client["snapshot_paths"],
             ]
 
+            current_time = time.time()
+            backup_age = current_time - client["timestamp"]
+
             backup_timestamp.add_metric(common_label_values, client["timestamp"])
+            backup_timestamp_seconds.add_metric(common_label_values, client["timestamp"])
+            backup_size_bytes.add_metric(common_label_values, client["size_total"])
             backup_files_total.add_metric(common_label_values, client["files_total"])
+            # Add folder/dir count metric if available
+            if client["dirs_total"] != -1 and client["dirs_total"] > 0:
+                backup_dirs_total.add_metric(common_label_values, client["dirs_total"])
+                # Calculate average files per directory
+                avg_files_per_dir = client["files_total"] / client["dirs_total"] if client["dirs_total"] > 0 else 0
+                backup_files_per_dir.add_metric(common_label_values, avg_files_per_dir)
+            # Add paths count metric
+            backup_paths_count.add_metric(common_label_values, client["paths_total"])
             backup_size_total.add_metric(common_label_values, client["size_total"])
             backup_snapshots_total.add_metric(
                 common_label_values, client["snapshots_total"]
             )
+            backup_age_seconds.add_metric(common_label_values, backup_age)
 
         scrape_duration_seconds.add_metric([], self.metrics["duration"])
 
@@ -124,9 +169,15 @@ class ResticCollector(object):
         yield locks_total
         yield snapshots_total
         yield backup_timestamp
+        yield backup_timestamp_seconds
+        yield backup_size_bytes
         yield backup_files_total
         yield backup_size_total
         yield backup_snapshots_total
+        yield backup_dirs_total
+        yield backup_paths_count
+        yield backup_files_per_dir
+        yield backup_age_seconds
         yield scrape_duration_seconds
 
     def refresh(self, exit_on_error=False):
@@ -185,6 +236,7 @@ class ResticCollector(object):
                 stats = {
                     "total_size": -1,
                     "total_file_count": -1,
+                    "total_dir_count": -1,  # Default value if stats are disabled
                 }
             else:
                 stats = self.get_stats(snap["id"])
@@ -205,6 +257,8 @@ class ResticCollector(object):
                     "timestamp": snap["timestamp"],
                     "size_total": stats["total_size"],
                     "files_total": stats["total_file_count"],
+                    "dirs_total": stats.get("total_dir_count", -1),  # Use get() to handle missing keys safely
+                    "paths_total": snap.get("paths_count", 0),  # Use the calculated paths count
                     "snapshots_total": snap_total_counter[snap["hash"]],
                 }
             )
@@ -265,6 +319,9 @@ class ResticCollector(object):
             if "username" not in snap:
                 snap["username"] = ""
             snap["hash"] = self.calc_snapshot_hash(snap)
+            
+            # Calculate additional snapshot metrics
+            snap["paths_count"] = len(snap.get("paths", [])) if snap.get("paths") else 0
         return snapshots
 
     def get_stats(self, snapshot_id=None):
@@ -297,10 +354,58 @@ class ResticCollector(object):
             )
         stats = json.loads(result.stdout.decode("utf-8"))
 
+        # Add folder count by running 'ls' command to get directory information
+        if snapshot_id is not None:
+            folder_count = self.get_folder_count(snapshot_id)
+            stats['total_dir_count'] = folder_count
+
         if snapshot_id is not None:
             self.stats_cache[snapshot_id] = stats
 
         return stats
+
+    def get_folder_count(self, snapshot_id):
+        """Get the number of directories in a snapshot by using 'restic ls' with a simple approach"""
+        cmd = [
+            "restic",
+            "-r",
+            self.repository,
+            "-p",
+            self.password_file,
+            "--no-lock",
+            "ls",
+            snapshot_id
+        ]
+
+        if self.insecure_tls:
+            cmd.extend(["--insecure-tls"])
+
+        # Run with timeout to prevent hanging on large repositories
+        try:
+            result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
+            if result.returncode != 0:
+                logging.warning("Error getting directory list for snapshot %s: %s", 
+                               snapshot_id, self.parse_stderr(result))
+                return 0
+
+            output = result.stdout.decode("utf-8")
+            folder_count = 0
+            
+            # Count lines that represent directories
+            # In restic ls output, directories often end with '/' 
+            lines = output.splitlines()
+            for line in lines:
+                # Simple approach: count lines that end with '/' which indicates directories
+                if line.strip().endswith('/'):
+                    folder_count += 1
+                    
+            return folder_count
+        except subprocess.TimeoutExpired:
+            logging.warning(f"Directory count operation timed out for snapshot {snapshot_id}, skipping directory count")
+            return 0
+        except Exception as e:
+            logging.warning(f"Error counting directories for snapshot {snapshot_id}: {str(e)}")
+            return 0
 
     def get_check(self):
         # This command takes 20 seconds or more, but it's required
@@ -391,9 +496,9 @@ if __name__ == "__main__":
         logging.error("The environment variable RESTIC_REPOSITORY is mandatory")
         sys.exit(1)
 
-    restic_repo_password_file = os.environ.get("RESTIC_PASSWORD_FILE")
+    restic_repo_password_file = "/etc/restic/password.txt"
     if restic_repo_password_file is None:
-        restic_repo_password_file = os.environ.get("RESTIC_REPO_PASSWORD_FILE")
+        restic_repo_password_file = "/mnt/nfs_backup"
         if restic_repo_password_file is not None:
             logging.warning(
                 "The environment variable RESTIC_REPO_PASSWORD_FILE is deprecated, "
