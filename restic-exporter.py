@@ -255,16 +255,19 @@ class ResticCollector(object):
         retention_age_span_seconds.add_metric([], total_span)
         
         # For retention max age by unit - this should represent how far back we have coverage for each retention type
+        # All types show the age of the oldest backup in seconds
         retention_max_age_by_unit.add_metric(["hourly"], oldest_backup_age)
         retention_max_age_by_unit.add_metric(["daily"], oldest_backup_age)
         retention_max_age_by_unit.add_metric(["weekly"], oldest_backup_age)
         retention_max_age_by_unit.add_metric(["monthly"], oldest_backup_age)
         
-        # For retention policy coverage - show how far back in time we have backups for each type
-        retention_policy_coverage_days.add_metric(["hourly"], oldest_backup_age / 3600)  # hours back
-        retention_policy_coverage_days.add_metric(["daily"], oldest_backup_age / 86400)  # days back
-        retention_policy_coverage_days.add_metric(["weekly"], oldest_backup_age / 604800)  # weeks back
-        retention_policy_coverage_days.add_metric(["monthly"], oldest_backup_age / 2592000)  # ~months back
+        # For retention policy coverage - show how far back we have backups available for recovery
+        # The grafana unit is "d" for days, so we need to provide proper day counts
+        # All retention types show the same: how far back our oldest backup goes
+        retention_policy_coverage_days.add_metric(["hourly"], oldest_backup_age / 86400)  # days back we can recover to
+        retention_policy_coverage_days.add_metric(["daily"], oldest_backup_age / 86400)  # days back we can recover to
+        retention_policy_coverage_days.add_metric(["weekly"], oldest_backup_age / 86400)  # days back we can recover to
+        retention_policy_coverage_days.add_metric(["monthly"], oldest_backup_age / 86400)  # days back we can recover to
         
         # Add time period counts based on actual backup intervals from ALL snapshots
         backups_by_period.add_metric(["hourly"], hourly_intervals)

@@ -1568,7 +1568,7 @@
           "refId": "A"
         }
       ],
-      "title": "Retention Policy Coverage (Time Back)",
+      "title": "Available Backup History (How Far Back)",
       "type": "bargauge"
     },
     {
@@ -1668,7 +1668,7 @@
           "refId": "A"
         }
       ],
-      "title": "Retention Maximum Age (Current to Oldest Backup)",
+      "title": "Total Backup History Span",
       "type": "timeseries"
     },
     {
