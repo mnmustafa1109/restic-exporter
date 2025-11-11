@@ -55,6 +55,16 @@ class ResticCollector(object):
             "snapshot_paths",
         ]
 
+        # Labels for time-based metrics (without client-specific labels to avoid high cardinality)
+        time_label_names = [
+            "period"  # hourly, daily, weekly, monthly
+        ]
+        
+        # Labels for retention period metrics
+        retention_label_names = [
+            "retention_type"  # hourly, daily, weekly, monthly
+        ]
+
         check_success = GaugeMetricFamily(
             "restic_check_success",
             "Result of restic check operation in the repository",
@@ -121,6 +131,30 @@ class ResticCollector(object):
             "Age of backup in seconds",
             labels=common_label_names,
         )
+        # Time-based backup count metrics
+        backups_by_period = CounterMetricFamily(
+            "restic_backups_by_period_total",
+            "Total number of backups by time period",
+            labels=time_label_names,
+        )
+        # Retention period metrics - show how far back the oldest backup exists overall
+        retention_oldest_backup_age = GaugeMetricFamily(
+            "restic_retention_oldest_backup_age_seconds",
+            "Age of the oldest backup available in the repository (how far back retention maintains)",
+            labels=[],
+        )
+        # Additional retention metrics to help verify if policies are properly maintained
+        retention_age_span_seconds = GaugeMetricFamily(
+            "restic_retention_age_span_seconds",
+            "Total time span from newest to oldest backup available in the repository",
+            labels=[],
+        )
+        # Metrics showing how far back in each time unit we have coverage
+        retention_max_age_by_unit = GaugeMetricFamily(
+            "restic_retention_max_age_seconds",
+            "Maximum age of backups available for different time periods",
+            labels=retention_label_names,
+        )
         scrape_duration_seconds = GaugeMetricFamily(
             "restic_scrape_duration_seconds",
             "Amount of time each scrape takes",
@@ -130,6 +164,34 @@ class ResticCollector(object):
         check_success.add_metric([], self.metrics["check_success"])
         locks_total.add_metric([], self.metrics["locks_total"])
         snapshots_total.add_metric([], self.metrics["snapshots_total"])
+
+        # Calculate time-based backup counts and retention metrics
+        current_time = time.time()
+        hourly_count = 0
+        daily_count = 0
+        weekly_count = 0
+        monthly_count = 0
+        
+        # Sort snapshots by timestamp to analyze retention
+        sorted_snapshots = sorted(self.metrics["clients"], key=lambda x: x["timestamp"])
+        
+        # Initialize retention tracking - we want to know how far back we have backups
+        hourly_max_age = 0  # age in seconds of the oldest backup within the hourly category
+        daily_max_age = 0   # age in seconds of the oldest backup within the daily category  
+        weekly_max_age = 0  # age in seconds of the oldest backup within the weekly category
+        monthly_max_age = 0 # age in seconds of the oldest backup within the monthly category
+        
+        # Calculate spans for retention age (time from newest to oldest backup in each category)
+        hourly_span = 0
+        daily_span = 0
+        weekly_span = 0
+        monthly_span = 0
+
+        # Find the newest backup age for each category
+        hourly_min_age = float('inf')
+        daily_min_age = float('inf')
+        weekly_min_age = float('inf')
+        monthly_min_age = float('inf')
 
         for client in self.metrics["clients"]:
             common_label_values = [
@@ -142,8 +204,33 @@ class ResticCollector(object):
                 client["snapshot_paths"],
             ]
 
-            current_time = time.time()
             backup_age = current_time - client["timestamp"]
+
+            # Count backups by time period
+            if backup_age <= 3600:  # Last hour
+                hourly_count += 1
+                if backup_age > hourly_max_age:
+                    hourly_max_age = backup_age
+                if backup_age < hourly_min_age:
+                    hourly_min_age = backup_age
+            if backup_age <= 86400:  # Last day
+                daily_count += 1
+                if backup_age > daily_max_age:
+                    daily_max_age = backup_age
+                if backup_age < daily_min_age:
+                    daily_min_age = backup_age
+            if backup_age <= 604800:  # Last week (7 days)
+                weekly_count += 1
+                if backup_age > weekly_max_age:
+                    weekly_max_age = backup_age
+                if backup_age < weekly_min_age:
+                    weekly_min_age = backup_age
+            if backup_age <= 2592000:  # Last month (30 days approx)
+                monthly_count += 1
+                if backup_age > monthly_max_age:
+                    monthly_max_age = backup_age
+                if backup_age < monthly_min_age:
+                    monthly_min_age = backup_age
 
             backup_timestamp.add_metric(common_label_values, client["timestamp"])
             backup_timestamp_seconds.add_metric(common_label_values, client["timestamp"])
@@ -163,6 +250,54 @@ class ResticCollector(object):
             )
             backup_age_seconds.add_metric(common_label_values, backup_age)
 
+        # Calculate spans (if we found backups in a category)
+        if hourly_min_age != float('inf'):
+            hourly_span = hourly_max_age - hourly_min_age
+        if daily_min_age != float('inf'):
+            daily_span = daily_max_age - daily_min_age
+        if weekly_min_age != float('inf'):
+            weekly_span = weekly_max_age - weekly_min_age
+        if monthly_min_age != float('inf'):
+            monthly_span = monthly_max_age - monthly_min_age
+
+        # Set defaults to 0 if no backups were found in a category
+        if hourly_min_age == float('inf'):
+            hourly_min_age = 0
+        if daily_min_age == float('inf'):
+            daily_min_age = 0
+        if weekly_min_age == float('inf'):
+            weekly_min_age = 0
+        if monthly_min_age == float('inf'):
+            monthly_min_age = 0
+
+        # Add time period counts to the metric
+        backups_by_period.add_metric(["hourly"], hourly_count)
+        backups_by_period.add_metric(["daily"], daily_count)
+        backups_by_period.add_metric(["weekly"], weekly_count)
+        backups_by_period.add_metric(["monthly"], monthly_count)
+
+        # Calculate overall retention metrics
+        if self.metrics["clients"]:
+            timestamps = [client["timestamp"] for client in self.metrics["clients"]]
+            oldest_timestamp = min(timestamps)
+            newest_timestamp = max(timestamps)
+            
+            oldest_backup_age = current_time - oldest_timestamp
+            newest_backup_age = current_time - newest_timestamp
+            total_span = oldest_backup_age  # Total span from now to the oldest backup
+            
+            # Add main retention metrics
+            retention_oldest_backup_age.add_metric([], oldest_backup_age)
+            retention_age_span_seconds.add_metric([], total_span)
+
+        # Add retention max age by unit metrics
+        retention_max_age_by_unit.add_metric(["hourly"], hourly_max_age)
+        retention_max_age_by_unit.add_metric(["daily"], daily_max_age)
+        retention_max_age_by_unit.add_metric(["weekly"], weekly_max_age)
+        retention_max_age_by_unit.add_metric(["monthly"], monthly_max_age)
+        
+        # The retention_age_span_seconds metric will be added in the overall calculation block above
+
         scrape_duration_seconds.add_metric([], self.metrics["duration"])
 
         yield check_success
@@ -178,6 +313,10 @@ class ResticCollector(object):
         yield backup_paths_count
         yield backup_files_per_dir
         yield backup_age_seconds
+        yield backups_by_period
+        yield retention_oldest_backup_age
+        yield retention_age_span_seconds
+        yield retention_max_age_by_unit
         yield scrape_duration_seconds
 
     def refresh(self, exit_on_error=False):
