@@ -59,7 +59,7 @@ class ResticCollector(object):
         time_label_names = [
             "period"  # hourly, daily, weekly, monthly
         ]
-        
+
         # Labels for retention period metrics
         retention_label_names = [
             "retention_type"  # hourly, daily, weekly, monthly
@@ -171,28 +171,54 @@ class ResticCollector(object):
         locks_total.add_metric([], self.metrics["locks_total"])
         snapshots_total.add_metric([], self.metrics["snapshots_total"])
 
-        # Calculate time-based backup counts and retention metrics
-        current_time = time.time()
-        hourly_count = 0
-        daily_count = 0
-        weekly_count = 0
-        monthly_count = 0
-        
-        # Sort snapshots by timestamp to analyze retention
+        # Sort snapshots by timestamp to analyze retention properly
         sorted_snapshots = sorted(self.metrics["clients"], key=lambda x: x["timestamp"])
-        
-        # Initialize retention tracking - we want to know how far back we have backups
-        hourly_max_age = 0  # age in seconds of the oldest backup within the hourly category
-        daily_max_age = 0   # age in seconds of the oldest backup within the daily category  
-        weekly_max_age = 0  # age in seconds of the oldest backup within the weekly category
-        monthly_max_age = 0 # age in seconds of the oldest backup within the monthly category
-        
-        # Initialize maximum age tracking for each retention type
-        hourly_max_age = 0  # maximum age of backups that qualify for hourly category
-        daily_max_age = 0   # maximum age of backups that qualify for daily category  
-        weekly_max_age = 0  # maximum age of backups that qualify for weekly category
-        monthly_max_age = 0 # maximum age of backups that qualify for monthly category
 
+        # Calculate overall retention metrics based on the full snapshot timeline first 
+        # Get ALL snapshots for retention analysis (not just latest per hash)
+        all_snapshot_timestamps = [client["timestamp"] for client in self.metrics.get("all_snapshots", [])]
+        
+        if all_snapshot_timestamps:
+            current_time = time.time()
+            oldest_timestamp = min(all_snapshot_timestamps)
+            newest_timestamp = max(all_snapshot_timestamps)
+
+            # Age of the oldest backup (how far back our retention covers)
+            oldest_backup_age = current_time - oldest_timestamp
+
+            # Time span of the backup history (newest - oldest snapshot)
+            total_span = newest_timestamp - oldest_timestamp
+
+            # Calculate time intervals between consecutive snapshots to determine backup frequency
+            sorted_all_snapshots = sorted(self.metrics.get("all_snapshots", []), key=lambda x: x["timestamp"])
+            if len(sorted_all_snapshots) > 1:
+                time_intervals = []
+                for i in range(1, len(sorted_all_snapshots)):
+                    interval_seconds = sorted_all_snapshots[i]["timestamp"] - sorted_all_snapshots[i-1]["timestamp"]
+                    time_intervals.append(interval_seconds)
+
+                # Count intervals by their duration to determine backup frequency
+                hourly_intervals = sum(1 for interval in time_intervals if interval <= 7200)  # <= 2 hours
+                daily_intervals = sum(1 for interval in time_intervals if 7200 < interval <= 172800)  # 2-48 hours
+                weekly_intervals = sum(1 for interval in time_intervals if 172800 < interval <= 1209600)  # 48 hours-2 weeks
+                monthly_intervals = sum(1 for interval in time_intervals if interval > 1209600)  # >2 weeks
+            else:
+                # Only one snapshot, so no intervals to analyze
+                hourly_intervals = 0
+                daily_intervals = 0
+                weekly_intervals = 0
+                monthly_intervals = 0
+        else:
+            # If no backups, set defaults
+            current_time = time.time()
+            oldest_backup_age = 0
+            total_span = 0
+            hourly_intervals = 0
+            daily_intervals = 0
+            weekly_intervals = 0
+            monthly_intervals = 0
+
+        # Now process individual clients and add their basic metrics
         for client in self.metrics["clients"]:
             common_label_values = [
                 client["hostname"],
@@ -205,28 +231,6 @@ class ResticCollector(object):
             ]
 
             backup_age = current_time - client["timestamp"]
-
-            # Count backups by time period (overlapping categories to count all backups in their age ranges)
-            # Count ALL backups in each category to get total count per time period
-            if backup_age <= 3600:  # Within last hour
-                hourly_count += 1
-            if backup_age <= 86400:  # Within last day
-                daily_count += 1
-            if backup_age <= 604800:  # Within last week
-                weekly_count += 1
-            if backup_age <= 2592000:  # Within last month
-                monthly_count += 1
-
-            # For max age metrics, track the maximum age for each category properly
-            # This means updating max age if current backup is older than current max
-            if backup_age > hourly_max_age:
-                hourly_max_age = backup_age
-            if backup_age > daily_max_age:
-                daily_max_age = backup_age
-            if backup_age > weekly_max_age:
-                weekly_max_age = backup_age
-            if backup_age > monthly_max_age:
-                monthly_max_age = backup_age
 
             backup_timestamp.add_metric(common_label_values, client["timestamp"])
             backup_timestamp_seconds.add_metric(common_label_values, client["timestamp"])
@@ -246,54 +250,27 @@ class ResticCollector(object):
             )
             backup_age_seconds.add_metric(common_label_values, backup_age)
 
-        # All max_age values are already calculated in the loop
-        # No span calculations needed for this implementation
-
-        # Add time period counts to the metric
-        backups_by_period.add_metric(["hourly"], hourly_count)
-        backups_by_period.add_metric(["daily"], daily_count)
-        backups_by_period.add_metric(["weekly"], weekly_count)
-        backups_by_period.add_metric(["monthly"], monthly_count)
-
-        # Calculate overall retention metrics
-        if self.metrics["clients"]:
-            timestamps = [client["timestamp"] for client in self.metrics["clients"]]
-            oldest_timestamp = min(timestamps)
-            newest_timestamp = max(timestamps)
-            
-            oldest_backup_age = current_time - oldest_timestamp
-            # Total span is the time difference between the oldest and newest backup timestamps
-            # This represents how much time is covered by the backup history
-            total_span = newest_timestamp - oldest_timestamp
-            
-            # Add main retention metrics
-            retention_oldest_backup_age.add_metric([], oldest_backup_age)
-            retention_age_span_seconds.add_metric([], total_span)
-        else:
-            # If no clients, set defaults
-            retention_oldest_backup_age.add_metric([], 0)
-            retention_age_span_seconds.add_metric([], 0)
-
-        # Calculate days of coverage for each retention type
-        hourly_days_coverage = hourly_max_age / 3600 if hourly_count > 0 else 0  # Convert seconds to hours
-        daily_days_coverage = daily_max_age / 86400 if daily_count > 0 else 0   # Convert seconds to days
-        weekly_days_coverage = weekly_max_age / 604800 if weekly_count > 0 else 0 # Convert seconds to weeks
-        monthly_days_coverage = monthly_max_age / 2592000 if monthly_count > 0 else 0 # Convert seconds to ~30-day months
-
-        # Add retention max age by unit metrics (these show the max age within each time category)
-        # These represent how far back in time we have backups for each category
-        retention_max_age_by_unit.add_metric(["hourly"], hourly_max_age)
-        retention_max_age_by_unit.add_metric(["daily"], daily_max_age)
-        retention_max_age_by_unit.add_metric(["weekly"], weekly_max_age)
-        retention_max_age_by_unit.add_metric(["monthly"], monthly_max_age)
+        # Add retention metrics based on ALL snapshots analysis
+        retention_oldest_backup_age.add_metric([], oldest_backup_age)
+        retention_age_span_seconds.add_metric([], total_span)
         
-        # Add retention policy coverage metrics (showing coverage in respective time units)
-        retention_policy_coverage_days.add_metric(["hourly"], hourly_days_coverage)
-        retention_policy_coverage_days.add_metric(["daily"], daily_days_coverage)
-        retention_policy_coverage_days.add_metric(["weekly"], weekly_days_coverage)
-        retention_policy_coverage_days.add_metric(["monthly"], monthly_days_coverage)
+        # For retention max age by unit - this should represent how far back we have coverage for each retention type
+        retention_max_age_by_unit.add_metric(["hourly"], oldest_backup_age)
+        retention_max_age_by_unit.add_metric(["daily"], oldest_backup_age)
+        retention_max_age_by_unit.add_metric(["weekly"], oldest_backup_age)
+        retention_max_age_by_unit.add_metric(["monthly"], oldest_backup_age)
         
-        # The retention_age_span_seconds metric will be added in the overall calculation block above
+        # For retention policy coverage - show how far back in time we have backups for each type
+        retention_policy_coverage_days.add_metric(["hourly"], oldest_backup_age / 3600)  # hours back
+        retention_policy_coverage_days.add_metric(["daily"], oldest_backup_age / 86400)  # days back
+        retention_policy_coverage_days.add_metric(["weekly"], oldest_backup_age / 604800)  # weeks back
+        retention_policy_coverage_days.add_metric(["monthly"], oldest_backup_age / 2592000)  # ~months back
+        
+        # Add time period counts based on actual backup intervals from ALL snapshots
+        backups_by_period.add_metric(["hourly"], hourly_intervals)
+        backups_by_period.add_metric(["daily"], daily_intervals)
+        backups_by_period.add_metric(["weekly"], weekly_intervals)
+        backups_by_period.add_metric(["monthly"], monthly_intervals)
 
         scrape_duration_seconds.add_metric([], self.metrics["duration"])
 
@@ -330,10 +307,49 @@ class ResticCollector(object):
             if exit_on_error:
                 sys.exit(1)
 
+    def parse_snapshot_timestamp(self, time_str):
+        """Parse a snapshot timestamp string to Unix timestamp with proper timezone handling."""
+        try:
+            # Handle timezone formats properly
+            # First, handle 'Z' suffix which indicates UTC
+            if time_str.endswith('Z'):
+                # Convert 'Z' suffix to explicit UTC offset for fromisoformat
+                time_str = time_str[:-1] + '+00:00'
+            
+            # Handle timezone offset with colon (e.g., +01:00 -> +0100)
+            if re.search(r'[+-]\d{2}:\d{2}$', time_str):
+                time_str = re.sub(r'([+-]\d{2}):(\d{2})$', r'\1\2', time_str)
+            
+            # Parse with timezone info if present
+            if re.search(r'[+-]\d{4}$', time_str):  # ends with +HHMM or -HHMM
+                dt = datetime.datetime.fromisoformat(time_str)
+                timestamp = dt.timestamp()
+            else:
+                # No timezone info - parse as naive datetime and treat as UTC
+                time_to_parse = re.sub(r'\.\d+.*$', '', time_str)  # Remove fractional seconds
+                dt = datetime.datetime.fromisoformat(time_to_parse)
+                # Treat naive datetime as UTC by making it timezone-aware
+                import datetime as dt_module
+                utc_dt = dt.replace(tzinfo=dt_module.timezone.utc)
+                timestamp = utc_dt.timestamp()
+
+        except (ValueError, AttributeError):
+            # Fallback to strptime for compatibility
+            time_parsed = re.sub(r"\.[^+-]+", "", time_str)
+            if re.search(r'[+-]\d{2,4}$', time_parsed):  # timezone offset present
+                time_format = "%Y-%m-%dT%H:%M:%S%z"
+            else:
+                time_format = "%Y-%m-%dT%H:%M:%S"
+            
+            parsed_time = datetime.datetime.strptime(time_parsed, time_format)
+            timestamp = parsed_time.timestamp()
+        
+        return timestamp
+
     def get_metrics(self):
         duration = time.time()
 
-        # calc total number of snapshots per hash
+        # Get ALL snapshots for both regular metrics and retention analysis
         all_snapshots = self.get_snapshots()
         snap_total_counter = {}
         for snap in all_snapshots:
@@ -342,23 +358,17 @@ class ResticCollector(object):
             else:
                 snap_total_counter[snap["hash"]] += 1
 
-        # get the latest snapshot per hash
-        latest_snapshots_dup = self.get_snapshots(True)
+        # Parse ALL snapshots to get timestamps for retention analysis
+        all_snapshots_with_timestamps = []
+        for snap in all_snapshots:
+            timestamp = self.parse_snapshot_timestamp(snap["time"])
+            snap_with_timestamp = snap.copy()
+            snap_with_timestamp["timestamp"] = timestamp
+            all_snapshots_with_timestamps.append(snap_with_timestamp)
+
+        # get the latest snapshot per hash for regular metrics
         latest_snapshots = {}
-        for snap in latest_snapshots_dup:
-            time_parsed = re.sub(r"\.[^+-]+", "", snap["time"])
-            if len(time_parsed) > 19:
-                # restic 14: '2023-01-12T06:59:33.1576588+01:00' ->
-                # '2023-01-12T06:59:33+01:00'
-                time_format = "%Y-%m-%dT%H:%M:%S%z"
-            else:
-                # restic 12: '2023-02-01T14:14:19.30760523Z' ->
-                # '2023-02-01T14:14:19'
-                time_format = "%Y-%m-%dT%H:%M:%S"
-            timestamp = time.mktime(
-                datetime.datetime.strptime(time_parsed, time_format).timetuple()
-            )
-            snap["timestamp"] = timestamp
+        for snap in all_snapshots_with_timestamps:
             if (
                 snap["hash"] not in latest_snapshots
                 or snap["timestamp"] > latest_snapshots[snap["hash"]]["timestamp"]
@@ -420,6 +430,7 @@ class ResticCollector(object):
             "check_success": check_success,
             "locks_total": locks_total,
             "clients": clients,
+            "all_snapshots": all_snapshots_with_timestamps,  # Added for retention analysis
             "snapshots_total": len(all_snapshots),
             "duration": time.time() - duration,
             # 'size_total': stats['total_size'],
@@ -456,7 +467,7 @@ class ResticCollector(object):
             if "username" not in snap:
                 snap["username"] = ""
             snap["hash"] = self.calc_snapshot_hash(snap)
-            
+
             # Calculate additional snapshot metrics
             snap["paths_count"] = len(snap.get("paths", [])) if snap.get("paths") else 0
         return snapshots
@@ -521,21 +532,21 @@ class ResticCollector(object):
         try:
             result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
             if result.returncode != 0:
-                logging.warning("Error getting directory list for snapshot %s: %s", 
+                logging.warning("Error getting directory list for snapshot %s: %s",
                                snapshot_id, self.parse_stderr(result))
                 return 0
 
             output = result.stdout.decode("utf-8")
             folder_count = 0
-            
+
             # Count lines that represent directories
-            # In restic ls output, directories often end with '/' 
+            # In restic ls output, directories often end with '/'
             lines = output.splitlines()
             for line in lines:
                 # Count lines that end with '/' which indicates directories
                 if line.strip().endswith('/'):
                     folder_count += 1
-                    
+
             # If no directories were found using the '/' method, try to infer from file paths
             if folder_count == 0:
                 # Count unique directories from file paths by examining file paths
@@ -644,14 +655,7 @@ if __name__ == "__main__":
         logging.error("The environment variable RESTIC_REPOSITORY is mandatory")
         sys.exit(1)
 
-    restic_repo_password_file = "/etc/restic/password.txt"
-    if restic_repo_password_file is None:
-        restic_repo_password_file = "/mnt/nfs_backup"
-        if restic_repo_password_file is not None:
-            logging.warning(
-                "The environment variable RESTIC_REPO_PASSWORD_FILE is deprecated, "
-                "please use RESTIC_PASSWORD_FILE instead."
-            )
+    restic_repo_password_file = os.environ.get("RESTIC_PASSWORD_FILE")
     if restic_repo_password_file is None:
         logging.error("The environment variable RESTIC_PASSWORD_FILE is mandatory")
         sys.exit(1)
