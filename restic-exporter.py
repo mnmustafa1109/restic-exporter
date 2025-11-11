@@ -155,6 +155,12 @@ class ResticCollector(object):
             "Maximum age of backups available for different time periods",
             labels=retention_label_names,
         )
+        # Additional metrics to help monitor retention policy compliance
+        retention_policy_coverage_days = GaugeMetricFamily(
+            "restic_retention_policy_coverage_days",
+            "Days/hours/weeks/months of backup coverage available (helps verify retention policy compliance)",
+            labels=retention_label_names,
+        )
         scrape_duration_seconds = GaugeMetricFamily(
             "restic_scrape_duration_seconds",
             "Amount of time each scrape takes",
@@ -181,17 +187,11 @@ class ResticCollector(object):
         weekly_max_age = 0  # age in seconds of the oldest backup within the weekly category
         monthly_max_age = 0 # age in seconds of the oldest backup within the monthly category
         
-        # Calculate spans for retention age (time from newest to oldest backup in each category)
-        hourly_span = 0
-        daily_span = 0
-        weekly_span = 0
-        monthly_span = 0
-
-        # Find the newest backup age for each category
-        hourly_min_age = float('inf')
-        daily_min_age = float('inf')
-        weekly_min_age = float('inf')
-        monthly_min_age = float('inf')
+        # Initialize maximum age tracking for each retention type
+        hourly_max_age = 0  # maximum age of backups that qualify for hourly category
+        daily_max_age = 0   # maximum age of backups that qualify for daily category  
+        weekly_max_age = 0  # maximum age of backups that qualify for weekly category
+        monthly_max_age = 0 # maximum age of backups that qualify for monthly category
 
         for client in self.metrics["clients"]:
             common_label_values = [
@@ -206,31 +206,27 @@ class ResticCollector(object):
 
             backup_age = current_time - client["timestamp"]
 
-            # Count backups by time period
-            if backup_age <= 3600:  # Last hour
+            # Count backups by time period (overlapping categories to count all backups in their age ranges)
+            # Count ALL backups in each category to get total count per time period
+            if backup_age <= 3600:  # Within last hour
                 hourly_count += 1
-                if backup_age > hourly_max_age:
-                    hourly_max_age = backup_age
-                if backup_age < hourly_min_age:
-                    hourly_min_age = backup_age
-            if backup_age <= 86400:  # Last day
+            if backup_age <= 86400:  # Within last day
                 daily_count += 1
-                if backup_age > daily_max_age:
-                    daily_max_age = backup_age
-                if backup_age < daily_min_age:
-                    daily_min_age = backup_age
-            if backup_age <= 604800:  # Last week (7 days)
+            if backup_age <= 604800:  # Within last week
                 weekly_count += 1
-                if backup_age > weekly_max_age:
-                    weekly_max_age = backup_age
-                if backup_age < weekly_min_age:
-                    weekly_min_age = backup_age
-            if backup_age <= 2592000:  # Last month (30 days approx)
+            if backup_age <= 2592000:  # Within last month
                 monthly_count += 1
-                if backup_age > monthly_max_age:
-                    monthly_max_age = backup_age
-                if backup_age < monthly_min_age:
-                    monthly_min_age = backup_age
+
+            # For max age metrics, track the maximum age for each category properly
+            # This means updating max age if current backup is older than current max
+            if backup_age > hourly_max_age:
+                hourly_max_age = backup_age
+            if backup_age > daily_max_age:
+                daily_max_age = backup_age
+            if backup_age > weekly_max_age:
+                weekly_max_age = backup_age
+            if backup_age > monthly_max_age:
+                monthly_max_age = backup_age
 
             backup_timestamp.add_metric(common_label_values, client["timestamp"])
             backup_timestamp_seconds.add_metric(common_label_values, client["timestamp"])
@@ -250,25 +246,8 @@ class ResticCollector(object):
             )
             backup_age_seconds.add_metric(common_label_values, backup_age)
 
-        # Calculate spans (if we found backups in a category)
-        if hourly_min_age != float('inf'):
-            hourly_span = hourly_max_age - hourly_min_age
-        if daily_min_age != float('inf'):
-            daily_span = daily_max_age - daily_min_age
-        if weekly_min_age != float('inf'):
-            weekly_span = weekly_max_age - weekly_min_age
-        if monthly_min_age != float('inf'):
-            monthly_span = monthly_max_age - monthly_min_age
-
-        # Set defaults to 0 if no backups were found in a category
-        if hourly_min_age == float('inf'):
-            hourly_min_age = 0
-        if daily_min_age == float('inf'):
-            daily_min_age = 0
-        if weekly_min_age == float('inf'):
-            weekly_min_age = 0
-        if monthly_min_age == float('inf'):
-            monthly_min_age = 0
+        # All max_age values are already calculated in the loop
+        # No span calculations needed for this implementation
 
         # Add time period counts to the metric
         backups_by_period.add_metric(["hourly"], hourly_count)
@@ -283,18 +262,36 @@ class ResticCollector(object):
             newest_timestamp = max(timestamps)
             
             oldest_backup_age = current_time - oldest_timestamp
-            newest_backup_age = current_time - newest_timestamp
-            total_span = oldest_backup_age  # Total span from now to the oldest backup
+            # Total span is the time difference between the oldest and newest backup timestamps
+            # This represents how much time is covered by the backup history
+            total_span = newest_timestamp - oldest_timestamp
             
             # Add main retention metrics
             retention_oldest_backup_age.add_metric([], oldest_backup_age)
             retention_age_span_seconds.add_metric([], total_span)
+        else:
+            # If no clients, set defaults
+            retention_oldest_backup_age.add_metric([], 0)
+            retention_age_span_seconds.add_metric([], 0)
 
-        # Add retention max age by unit metrics
+        # Calculate days of coverage for each retention type
+        hourly_days_coverage = hourly_max_age / 3600 if hourly_count > 0 else 0  # Convert seconds to hours
+        daily_days_coverage = daily_max_age / 86400 if daily_count > 0 else 0   # Convert seconds to days
+        weekly_days_coverage = weekly_max_age / 604800 if weekly_count > 0 else 0 # Convert seconds to weeks
+        monthly_days_coverage = monthly_max_age / 2592000 if monthly_count > 0 else 0 # Convert seconds to ~30-day months
+
+        # Add retention max age by unit metrics (these show the max age within each time category)
+        # These represent how far back in time we have backups for each category
         retention_max_age_by_unit.add_metric(["hourly"], hourly_max_age)
         retention_max_age_by_unit.add_metric(["daily"], daily_max_age)
         retention_max_age_by_unit.add_metric(["weekly"], weekly_max_age)
         retention_max_age_by_unit.add_metric(["monthly"], monthly_max_age)
+        
+        # Add retention policy coverage metrics (showing coverage in respective time units)
+        retention_policy_coverage_days.add_metric(["hourly"], hourly_days_coverage)
+        retention_policy_coverage_days.add_metric(["daily"], daily_days_coverage)
+        retention_policy_coverage_days.add_metric(["weekly"], weekly_days_coverage)
+        retention_policy_coverage_days.add_metric(["monthly"], monthly_days_coverage)
         
         # The retention_age_span_seconds metric will be added in the overall calculation block above
 
@@ -317,6 +314,7 @@ class ResticCollector(object):
         yield retention_oldest_backup_age
         yield retention_age_span_seconds
         yield retention_max_age_by_unit
+        yield retention_policy_coverage_days
         yield scrape_duration_seconds
 
     def refresh(self, exit_on_error=False):
