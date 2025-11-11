@@ -990,7 +990,7 @@
             "uid": "PBFA97CFB590B2093"
           },
           "editorMode": "code",
-          "expr": "restic_backup_dirs_total",
+          "expr": "max by(client_hostname, snapshot_tag) (restic_backup_dirs_total)",
           "legendFormat": "{{client_hostname}} - {{snapshot_tag}}",
           "range": true,
           "refId": "A"
@@ -1211,7 +1211,7 @@
           },
           "editorMode": "code",
           "exemplar": true,
-          "expr": "max by(client_hostname, snapshot_tag) (restic_backup_files_per_dir)",
+          "expr": "last_over_time(max by(client_hostname, snapshot_tag) (restic_backup_files_per_dir)[30m:])",
           "format": "table",
           "instant": true,
           "legendFormat": "__auto",
@@ -1330,7 +1330,7 @@
             "uid": "PBFA97CFB590B2093"
           },
           "editorMode": "code",
-          "expr": "restic_backup_paths_count",
+          "expr": "max by(client_hostname, snapshot_tag) (restic_backup_paths_count_total)",
           "legendFormat": "{{client_hostname}} - {{snapshot_tag}}",
           "range": true,
           "refId": "A"
